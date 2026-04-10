@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+
+# IDE / OS
+.vscode/
+.DS_Store
+
+# Virtual environments
+.venv
+
+# Saved API session (never commit)
+.cerby_session.json
+
+# Work session progress (local only)
+work_sessions/
+
+# Local exports and default DB from runs
+cerby_run_report_*.json
+cerby_work_session_*.json
+accounts.sqlite
+*.sqlite

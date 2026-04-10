@@ -1,0 +1,2 @@
+# This file is optional documentation only. The CLI prompts for workspace, app name, and role.
+# Sign-in is always in the browser; only the API access token is stored in .cerby_session.json (gitignored).

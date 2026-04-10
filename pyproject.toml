@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cerby-onboarding-cli"
+version = "0.1.0"
+description = "CLI to sync Cerby accounts, rotate passwords, and update roles after self-onboarding."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "art>=6.5",
+    "playwright>=1.58.0",
+    "pyjwt>=2.10.0",
+    "requests>=2.32.5",
+    "rich>=13.9.0",
+    "typer>=0.15.0",
+]
+
+[project.scripts]
+cerby-onboarding = "main:main"
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "auth_handler",
+    "cerby_client",
+    "account_storage",
+    "session_report",
+    "token_session",
+    "work_session",
+]
