@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cerby_client import parse_provider_specs
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -33,6 +35,24 @@ class SessionListEntry:
     updated_at: str
     rotated_count: int
     role_changed_count: int
+    # What was stored when the session started (can be several comma-separated providers).
+    session_app_name: str = ""
+
+
+def _provider_set(app_raw: str) -> frozenset[str]:
+    """Non-empty provider ids from a comma-separated app string (same rules as API prompts)."""
+    return frozenset(s for s in parse_provider_specs(app_raw) if s)
+
+
+def session_app_matches_current(session_app: str, current_app: str) -> bool:
+    # Overlap on comma-separated providers; "Any" (no concrete ids) on a side = wildcard.
+    saved = _provider_set(session_app)
+    current = _provider_set(current_app)
+    if not saved and not current:
+        return True
+    if not saved or not current:
+        return True
+    return bool(saved & current)
 
 
 class WorkSessionTracker:
@@ -117,7 +137,6 @@ class WorkSessionTracker:
         target_role: str,
         users: list[dict[str, Any]],
     ) -> None:
-        """Record a successful bulk role change for ``account_id`` with per-user before/after."""
         aid = str(account_id)
         ids: list[str] = self.data.setdefault("role_changed_account_ids", [])
         if aid not in ids:
@@ -150,7 +169,9 @@ def load_session_for_workspace_app(session_id: str, workspace: str, app_name: st
     if not path.is_file():
         raise ValueError(f"Work session file not found: {path}")
     t = WorkSessionTracker.load(path)
-    if (t.data.get("workspace") or "") != workspace or (t.data.get("app_name") or "") != app_name:
+    if (t.data.get("workspace") or "") != workspace or not session_app_matches_current(
+        str(t.data.get("app_name") or ""), app_name
+    ):
         raise ValueError(
             f"Session {t.data.get('session_id')} does not match this workspace ({workspace!r}) "
             f"and app ({app_name!r})."
@@ -159,7 +180,7 @@ def load_session_for_workspace_app(session_id: str, workspace: str, app_name: st
 
 
 def list_matching_sessions(workspace: str, app_name: str) -> list[SessionListEntry]:
-    """Return session summaries for the given workspace + app, newest first."""
+    # Same workspace plus overlapping provider set (not only an exact app_name string).
     root = Path("work_sessions")
     if not root.is_dir():
         return []
@@ -171,7 +192,10 @@ def list_matching_sessions(workspace: str, app_name: str) -> list[SessionListEnt
             continue
         if not isinstance(data, dict):
             continue
-        if data.get("workspace") != workspace or data.get("app_name") != app_name:
+        stored_app = str(data.get("app_name") or "")
+        if data.get("workspace") != workspace or not session_app_matches_current(
+            stored_app, app_name
+        ):
             continue
         _ensure_schema(data)
         rot_ids = data.get("rotated_account_ids") or []
@@ -186,6 +210,7 @@ def list_matching_sessions(workspace: str, app_name: str) -> list[SessionListEnt
                 updated_at=str(data.get("updated_at") or ""),
                 rotated_count=len(rot_ev) if rot_ev else len(rot_ids),
                 role_changed_count=len(role_ev) if role_ev else len(role_ids),
+                session_app_name=stored_app,
             )
         )
     return rows

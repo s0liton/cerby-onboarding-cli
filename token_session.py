@@ -30,6 +30,12 @@ def load_session() -> SessionData | None:
     return None
 
 
+def last_saved_workspace() -> str | None:
+    """Workspace from ``.cerby_session.json`` (last successful sign-in), even if the JWT is expired."""
+    data = load_session()
+    return data["workspace"] if data else None
+
+
 def save_session(workspace: str, access_token: str) -> None:
     data = {"workspace": workspace.strip(), "access_token": access_token.strip()}
     SESSION_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")

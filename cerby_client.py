@@ -1,9 +1,24 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable, Optional
 
 import requests
+
+_VERBOSE_BODY_MAX = 10_000
+
+
+def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    h = dict(headers)
+    if h.get("Authorization"):
+        h["Authorization"] = "Bearer <redacted>"
+    return h
+
+
+def _truncate_body(text: str, limit: int = _VERBOSE_BODY_MAX) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... ({len(text) - limit} bytes truncated)"
 
 SHARE_ROLE_BY_CLI: dict[str, str] = {
     "OWNER": "owner",
@@ -16,23 +31,57 @@ def share_role_for_api(cli_role_upper: str) -> str:
 
 
 def normalize_provider_filter(app_name: str) -> str:
-    """
-    Return provider id for API queries, or empty string when the user chose “any provider”.
-
-    ``Any`` / ``ANY`` / etc. (case-insensitive) means omit the ``provider`` query parameter so
-    the accounts list is not filtered by integration.
-    """
+    # Empty string = no provider filter on the accounts API (user said "Any").
     s = (app_name or "").strip()
     if s.casefold() == "any":
         return ""
     return s
 
 
+def parse_provider_specs(raw: str) -> list[str]:
+    # Comma-separated list; Cerby only takes one provider per request, so we fan out calls.
+    parts = [p.strip() for p in (raw or "").split(",") if p.strip()]
+    if not parts:
+        return [""]
+    return [normalize_provider_filter(p) for p in parts]
+
+
+def _account_row_id(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("accountId") or row.get("account_id") or "")
+
+
+def fetch_accounts_merged(
+    workspace: str,
+    provider_specs: list[str],
+    account_role: str,
+    token: str,
+    *,
+    verbose_log: Optional[Callable[[str], None]] = None,
+) -> list[dict[str, Any]]:
+    """One paginated list call per provider segment, merged (ids deduped; Cerby ids are global)."""
+    seen: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for spec in provider_specs:
+        api = CerbyApi(
+            workspace, spec, account_role, token, verbose_log=verbose_log
+        )
+        rows = api.fetch_all_accounts()
+        for row in rows:
+            aid = _account_row_id(row)
+            if aid:
+                if aid not in seen:
+                    seen[aid] = row
+                    order.append(aid)
+            else:
+                key = f"__noid_{id(row)}"
+                if key not in seen:
+                    seen[key] = row
+                    order.append(key)
+    return [seen[k] for k in order]
+
+
 def cerby_role_to_display_role(raw: str) -> str:
-    """
-    Map Cerby ``roleAssignations`` / share payload strings to ``OWNER`` or ``COLLABORATOR``.
-    Unknown non-empty values are returned uppercased for visibility.
-    """
+    # Cerby uses strings like account_owner; we normalize to OWNER / COLLABORATOR.
     s = (raw or "").strip()
     if not s:
         return ""
@@ -56,6 +105,8 @@ class CerbyApi:
         app_name: str,
         account_role: str,
         token: str,
+        *,
+        verbose_log: Optional[Callable[[str], None]] = None,
     ):
         self.workspace = workspace
         self.app_name = normalize_provider_filter(app_name)
@@ -67,9 +118,44 @@ class CerbyApi:
             "Content-Type": "application/json",
             "Cerby-Workspace": workspace,
         }
+        self._verbose_log = verbose_log
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: Any | None = None,
+        timeout: int = 120,
+    ) -> requests.Response:
+        if self._verbose_log:
+            lines = [
+                f"{method} {url}",
+                json.dumps(_redact_headers(self.headers), indent=2),
+            ]
+            if json_body is not None:
+                lines.append(json.dumps(json_body, indent=2, default=str))
+            self._verbose_log("\n".join(lines))
+        resp = requests.request(
+            method,
+            url,
+            headers=self.headers,
+            json=json_body,
+            timeout=timeout,
+        )
+        if self._verbose_log:
+            status_line = f"<= {resp.status_code} {resp.reason or ''}".strip()
+            body = _truncate_body(resp.text)
+            try:
+                parsed = resp.json()
+                body = _truncate_body(json.dumps(parsed, indent=2, default=str))
+            except (ValueError, TypeError):
+                pass
+            self._verbose_log(f"{status_line}\n{body}")
+        return resp
 
     def _extract_account_list(self, payload: Any) -> list[dict[str, Any]]:
-        """Normalize list endpoints that return either a bare JSON array or an object wrapper."""
+        # List endpoints are annoyingly inconsistent (array vs {data: [...]}).
         if payload is None:
             return []
         if isinstance(payload, list):
@@ -110,14 +196,9 @@ class CerbyApi:
         return q
 
     def probe_token(self) -> tuple[bool, int]:
-        """
-        Minimal accounts GET to validate the token for this workspace.
-
-        Returns ``(True, http_status)`` on success. On 401/403 returns ``(False, status)``
-        without raising so the caller can distinguish auth vs permission denied.
-        """
+        # Cheap GET; 401 vs 403 matters to the caller so we don't raise on those.
         endpoint = self._accounts_list_query(limit=1)
-        resp = requests.get(endpoint, headers=self.headers, timeout=60)
+        resp = self._request("GET", endpoint, timeout=60)
         if resp.status_code == 401:
             return False, 401
         if resp.status_code == 403:
@@ -126,25 +207,29 @@ class CerbyApi:
         return True, resp.status_code
 
     def fetch_all_accounts(self) -> list[dict[str, Any]]:
-        """
-        Page through accounts for the configured provider, or all integrations if no provider filter.
-
-        The API returns ``startIndex``, ``limit``, and ``totalResults`` on the wrapper
-        object; we use ``startIndex`` (1-based) + ``limit`` on each request and stop
-        when we have ``totalResults`` rows or a short page.
-        """
+        # Walk pages until totalResults, short page, or empty batch.
         all_rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         start_index = 1
         limit = 100
+        max_pages = 5000
+        pages = 0
 
-        while True:
+        while pages < max_pages:
+            pages += 1
             endpoint = self._accounts_list_query(limit=limit, start_index=start_index)
 
-            resp = requests.get(endpoint, headers=self.headers, timeout=120)
+            resp = self._request("GET", endpoint, timeout=120)
             resp.raise_for_status()
             body = resp.json()
             batch = self._extract_account_list(body)
-            all_rows.extend(batch)
+            for row in batch:
+                aid = _account_row_id(row)
+                if aid:
+                    if aid in seen_ids:
+                        continue
+                    seen_ids.add(aid)
+                all_rows.append(row)
 
             total = self._total_results(body)
             if total is not None and len(all_rows) >= total:
@@ -158,19 +243,16 @@ class CerbyApi:
         return all_rows
 
     def rotate_password(self, account_id: str) -> requests.Response:
-        """POST automation job to rotate the account password."""
         url = f"{self.api_base_url}accounts/{account_id}/automation-jobs"
         payload: dict[str, Any] = {
             "automationType": "password_rotation",
             "data": {"logoutAllSessions": False},
             "meta": {"logoutAllSessions": False},
         }
-        return requests.post(url, headers=self.headers, json=payload, timeout=120)
+        return self._request("POST", url, json_body=payload, timeout=120)
 
     def fetch_account_assigned_users(self, account_id: str) -> list[dict[str, Any]]:
-        """
-        List users assigned to an account (paginated POST search).
-        """
+        # members/users/search, paginated
         all_rows: list[dict[str, Any]] = []
         start_index = 1
         count = 20
@@ -183,7 +265,7 @@ class CerbyApi:
                 "guests": False,
                 "lastUsed": "true",
             }
-            resp = requests.post(url, headers=self.headers, json=payload, timeout=120)
+            resp = self._request("POST", url, json_body=payload, timeout=120)
             resp.raise_for_status()
             body = resp.json()
             batch = body.get("users") if isinstance(body, dict) else []
@@ -202,7 +284,6 @@ class CerbyApi:
 
     @staticmethod
     def user_ids_from_assigned_users(users: list[dict[str, Any]]) -> list[str]:
-        """Collect unique userIds from members/search ``users`` list."""
         seen: dict[str, None] = {}
         for u in users:
             uid = u.get("userId") or u.get("user_id")
@@ -216,10 +297,7 @@ class CerbyApi:
         account_id: str,
         user_ids: list[str],
     ) -> list[dict[str, Any]]:
-        """
-        For each user id, capture the Cerby ``role`` from ``roleAssignations`` for this account
-        (values such as ``account_owner`` / ``account_collaborator``) before a role change.
-        """
+        # Grab current role from roleAssignations before we POST share.
         want = {str(x) for x in user_ids}
         aid = str(account_id)
         out: list[dict[str, Any]] = []
@@ -251,19 +329,13 @@ class CerbyApi:
     def change_role(
         self, account_id: str, user_ids: list[str], app_role: str
     ) -> requests.Response:
-        """POST share update: set role for all listed users on this account in one call."""
         url = f"{self.api_base_url}accounts/share"
         payload = {
             "userIds": user_ids,
             "role": app_role,
             "accountId": account_id,
         }
-        return requests.post(
-            url,
-            headers=self.headers,
-            json=payload,
-            timeout=120,
-        )
+        return self._request("POST", url, json_body=payload, timeout=120)
 
     def describe_account(self, account: dict[str, Any]) -> str:
         for key in ("name", "username", "email", "title", "id"):
