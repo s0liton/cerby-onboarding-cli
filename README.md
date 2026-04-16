@@ -4,7 +4,7 @@ CLI for syncing accounts from Cerby, rotating passwords, and bulk-updating user 
 
 ## Introduction
 
-This tool helps you rotate passwords and change user roles for accounts in Cerby that were onboarded by end users. It can operate on accounts added from the Cerby dashboard or captured via the extension. When users add their own accounts or Cerby captures their credentials, the user is automatically given OWNER permissions to that account. This poses a security risk, since the user can modify the details of the account, share the account with others, and can reveal the password.
+This tool helps you rotate passwords and change user roles for accounts managed in Cerby. There are many situations where you may need to bulk rotate passwords and change roles on shared and individually managed accounts. When users add their own accounts or Cerby captures their credentials, the user is automatically given OWNER permissions to that account. This reduces the security that Cerby provides since the user can modify the details of the account, share the account with others, reveal the password, and take other harmful actions against their account.
 
 This tool allows you to quickly act on multiple accounts at once so that:
 
@@ -19,7 +19,9 @@ This tool allows you to quickly act on multiple accounts at once so that:
 - Work sessions — remember which accounts were already rotated or role-changed so you can safely re-run as more accounts are onboarded.
 - Per-run or overall session reports.
 - Automated Mode - Listens on an interval for new accounts of the specified types, and performs the actions you desire.
+- Exclude specific users from role changes.
 - Verbose logging.
+- Per-account granularity.
 
 ## Requirements
 
@@ -144,3 +146,5 @@ If you want to easily launch the tool using the `cerby-inboarding` command from 
 3. Add the **Scripts** folder, e.g. `C:\absolute\path\to\your\checkout\.venv\Scripts` (the folder, not the `.exe`).
 4. Confirm with **OK**, then open a **new** Command Prompt or PowerShell.
 5. Check: `cerby-onboarding --help`
+
+
