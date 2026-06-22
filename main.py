@@ -20,12 +20,19 @@ import account_storage
 import session_report
 import token_session
 import work_session
-from auth_handler import CerbyAuthHandler, is_access_token_valid
+from auth_handler import (
+    BrowserTokenRefreshSession,
+    CerbyAuthHandler,
+    access_token_seconds_remaining,
+    is_access_token_valid,
+)
 from cerby_client import (
+    TOKEN_PROACTIVE_REFRESH_WITHIN_SECONDS,
     CerbyApi,
     fetch_accounts_merged,
     normalize_provider_filter,
     parse_provider_specs,
+    refresh_access_token,
     share_role_for_api,
 )
 
@@ -490,11 +497,16 @@ def _obtain_token(
     app_name: str,
     *,
     verbose_log: Optional[Callable[[str], None]] = None,
-) -> str:
+    keep_browser_alive: bool = False,
+    replace_keeper: Optional[BrowserTokenRefreshSession] = None,
+) -> tuple[str, Optional[BrowserTokenRefreshSession]]:
     stored = token_session.load_session()
     if stored and stored["workspace"] == workspace:
         token = stored["access_token"]
         if is_access_token_valid(token):
+            token = _ensure_token_refreshed_proactively(
+                workspace, token, verbose_log=verbose_log
+            )
             probe_client = CerbyApi(
                 workspace=workspace,
                 app_name=_probe_provider_for_token(app_name),
@@ -507,7 +519,7 @@ def _obtain_token(
                     ok, status = probe_client.probe_token()
                     if ok:
                         console.print("[green]Using saved access token (still valid).[/green]\n")
-                        return token
+                        return token, replace_keeper
                     if status == 403:
                         _print_cerby_forbidden_guidance()
                         if _prompt_retry_after_permission_fix():
@@ -524,14 +536,68 @@ def _obtain_token(
             console.print(
                 "[yellow]Saved access token is expired; opening browser to sign in...[/yellow]"
             )
+            stored2 = token_session.load_session()
+            if (
+                stored2
+                and stored2["workspace"] == workspace
+                and is_access_token_valid(stored2["access_token"])
+            ):
+                return _obtain_token(
+                    workspace,
+                    app_name,
+                    verbose_log=verbose_log,
+                    keep_browser_alive=keep_browser_alive,
+                    replace_keeper=replace_keeper,
+                )
         token_session.clear_session()
 
-    handler = CerbyAuthHandler(workspace)
+    if replace_keeper is not None:
+        replace_keeper.stop()
+
     console.print("[bold]Authenticating[/bold] in the browser...")
+    if keep_browser_alive:
+        console.print(
+            "[dim][experimental] Chromium stays open; about every 60s the Cerby tab reloads and "
+            "any new access_token in localStorage is written to .cerby_session.json. "
+            "Stop the CLI (Ctrl+C) to close the browser.[/dim]\n"
+        )
+        keeper = BrowserTokenRefreshSession(workspace)
+        token = keeper.start_and_wait_first_token()
+        token_session.save_session(workspace, token)
+        console.print("[green]Access token saved for this workspace.[/green]\n")
+        return token, keeper
+
+    handler = CerbyAuthHandler(workspace)
     token = handler.get_access_token()
     token_session.save_session(workspace, token)
     console.print("[green]Access token saved for this workspace.[/green]\n")
-    return token
+    return token, None
+
+
+def _ensure_token_refreshed_proactively(
+    workspace: str,
+    token: str,
+    *,
+    verbose_log: Optional[Callable[[str], None]] = None,
+    within_seconds: float = TOKEN_PROACTIVE_REFRESH_WITHIN_SECONDS,
+) -> str:
+    """If the JWT expires within ``within_seconds``, call ``GET /v1/auth/refresh`` and persist."""
+    rem = access_token_seconds_remaining(token)
+    if rem is None or rem > within_seconds:
+        return token
+    try:
+        new_tok = refresh_access_token(token, workspace, verbose_log=verbose_log)
+        if not is_access_token_valid(new_tok):
+            return token
+        token_session.save_session(workspace, new_tok)
+        console.print("[dim]Access token refreshed via /v1/auth/refresh.[/dim]")
+        return new_tok
+    except Exception as e:
+        console.print(
+            f"[yellow]Proactive token refresh failed ({e!s}); "
+            "continuing with the current token.[/yellow]"
+        )
+        return token
 
 
 def _parse_poll_interval_seconds(raw: str) -> float:
@@ -568,6 +634,9 @@ def _fetch_accounts_merged_once_with_403_retry(
     announce_sync: bool,
     verbose_log: Optional[Callable[[str], None]] = None,
 ) -> list[dict[str, Any]]:
+    token = _ensure_token_refreshed_proactively(
+        cfg["CERBY_WORKSPACE"], token, verbose_log=verbose_log
+    )
     if announce_sync:
         console.print("[bold]Syncing accounts[/bold] from the API...")
     while True:
@@ -602,7 +671,14 @@ def _execute_bulk_account_actions(
     run_started_at: str,
     table_title: str = "Actions",
     role_exclude_user_ids: frozenset[str] = frozenset(),
+    verbose_log: Optional[Callable[[str], None]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    new_tok = _ensure_token_refreshed_proactively(
+        cfg["CERBY_WORKSPACE"], client.token, verbose_log=verbose_log
+    )
+    if new_tok != client.token:
+        client.replace_token(new_tok)
+
     api_share_role = share_role_for_api(cfg["ACCOUNT_ROLE"])
 
     def _utc_now() -> str:
@@ -1000,7 +1076,9 @@ def _run_automated_watch(
     session_tracker: work_session.WorkSessionTracker,
     *,
     verbose_log: Optional[Callable[[str], None]] = None,
-) -> None:
+    experimental_keep_browser_for_token: bool = False,
+    token_keeper: Optional[BrowserTokenRefreshSession] = None,
+) -> Optional[BrowserTokenRefreshSession]:
     console.print(
         "\n[dim]Taking the baseline snapshot next, then polling for new account ids only.[/dim]\n"
     )
@@ -1047,14 +1125,40 @@ def _run_automated_watch(
     try:
         while True:
             time.sleep(interval_sec)
+            stored = token_session.load_session()
+            if (
+                stored
+                and stored["workspace"] == cfg["CERBY_WORKSPACE"]
+                and is_access_token_valid(stored["access_token"])
+                and stored["access_token"] != token
+            ):
+                token = stored["access_token"]
+                client = CerbyApi(
+                    workspace=cfg["CERBY_WORKSPACE"],
+                    app_name=_probe_provider_for_token(cfg["APP_NAME"]),
+                    account_role=cfg["ACCOUNT_ROLE"],
+                    token=token,
+                    verbose_log=verbose_log,
+                )
+                console.print(
+                    "[dim][experimental] Switched in-memory API token to match updated "
+                    ".cerby_session.json.[/dim]"
+                )
+            token = _ensure_token_refreshed_proactively(
+                cfg["CERBY_WORKSPACE"], token, verbose_log=verbose_log
+            )
+            if client.token != token:
+                client.replace_token(token)
             if not is_access_token_valid(token):
                 console.print(
                     "\n[yellow]Access token expired; opening browser to sign in again...[/yellow]\n"
                 )
-                token = _obtain_token(
+                token, token_keeper = _obtain_token(
                     cfg["CERBY_WORKSPACE"],
                     cfg["APP_NAME"],
                     verbose_log=verbose_log,
+                    keep_browser_alive=experimental_keep_browser_for_token,
+                    replace_keeper=token_keeper,
                 )
                 client = CerbyApi(
                     workspace=cfg["CERBY_WORKSPACE"],
@@ -1088,6 +1192,7 @@ def _run_automated_watch(
                 run_started_at=run_started_at,
                 table_title="Automated actions",
                 role_exclude_user_ids=role_exclude_user_ids,
+                verbose_log=verbose_log,
             )
             all_rotations.extend(rots)
             all_role_changes.extend(rcs)
@@ -1104,6 +1209,7 @@ def _run_automated_watch(
         run_rotations=all_rotations,
         run_role_changes=all_role_changes,
     )
+    return token_keeper
 
 
 def _run_flow(
@@ -1114,109 +1220,128 @@ def _run_flow(
     session_id: Optional[str] = None,
     session_label: Optional[str] = None,
     verbose_log: Optional[Callable[[str], None]] = None,
+    experimental_keep_browser_for_token: bool = False,
 ) -> None:
-    token = _obtain_token(
-        cfg["CERBY_WORKSPACE"], cfg["APP_NAME"], verbose_log=verbose_log
-    )
-
-    client = CerbyApi(
-        workspace=cfg["CERBY_WORKSPACE"],
-        app_name=_probe_provider_for_token(cfg["APP_NAME"]),
-        account_role=cfg["ACCOUNT_ROLE"],
-        token=token,
-        verbose_log=verbose_log,
-    )
-
-    session_tracker = _prompt_work_session_tracker(
-        cfg["CERBY_WORKSPACE"],
-        cfg["APP_NAME"],
-        session_id=session_id,
-        session_label=session_label,
-    )
-
-    run_mode = Prompt.ask(
-        "Run mode",
-        choices=["manual", "automated"],
-        default="manual",
-    )
-    console.print(
-        "[dim]Manual: review the account list, pick rows, confirm, then bulk actions run as today. "
-        "Automated: poll Cerby on an interval and run actions only on accounts whose ids were not "
-        "in the first snapshot (baseline). Press Ctrl+C to stop listening.[/dim]\n"
-    )
-    if run_mode == "automated":
-        _run_automated_watch(
-            cfg, token, client, session_tracker, verbose_log=verbose_log
+    keeper: Optional[BrowserTokenRefreshSession] = None
+    try:
+        token, keeper = _obtain_token(
+            cfg["CERBY_WORKSPACE"],
+            cfg["APP_NAME"],
+            verbose_log=verbose_log,
+            keep_browser_alive=experimental_keep_browser_for_token,
         )
-        return
+        token = _ensure_token_refreshed_proactively(
+            cfg["CERBY_WORKSPACE"], token, verbose_log=verbose_log
+        )
 
-    accounts = _fetch_accounts_with_empty_retry(
-        cfg, token, verbose_log=verbose_log
-    )
-    if not accounts:
+        client = CerbyApi(
+            workspace=cfg["CERBY_WORKSPACE"],
+            app_name=_probe_provider_for_token(cfg["APP_NAME"]),
+            account_role=cfg["ACCOUNT_ROLE"],
+            token=token,
+            verbose_log=verbose_log,
+        )
+
+        session_tracker = _prompt_work_session_tracker(
+            cfg["CERBY_WORKSPACE"],
+            cfg["APP_NAME"],
+            session_id=session_id,
+            session_label=session_label,
+        )
+
+        run_mode = Prompt.ask(
+            "Run mode",
+            choices=["manual", "automated"],
+            default="manual",
+        )
         console.print(
-            "\n[yellow]No accounts to sync. Exiting before saving or bulk actions.[/yellow]\n"
+            "[dim]Manual: review the account list, pick rows, confirm, then bulk actions run as today. "
+            "Automated: poll Cerby on an interval and run actions only on accounts whose ids were not "
+            "in the first snapshot (baseline). Press Ctrl+C to stop listening.[/dim]\n"
         )
-        return
+        if run_mode == "automated":
+            keeper = _run_automated_watch(
+                cfg,
+                token,
+                client,
+                session_tracker,
+                verbose_log=verbose_log,
+                experimental_keep_browser_for_token=experimental_keep_browser_for_token,
+                token_keeper=keeper,
+            )
+            return
 
-    console.print(
-        f"\nFound [bold]{len(accounts)}[/bold] account(s) for "
-        f"[bold]{_provider_filter_label(cfg['APP_NAME'])}[/bold].\n"
-    )
-    _render_accounts_preview_table(accounts)
+        accounts = _fetch_accounts_with_empty_retry(
+            cfg, token, verbose_log=verbose_log
+        )
+        if not accounts:
+            console.print(
+                "\n[yellow]No accounts to sync. Exiting before saving or bulk actions.[/yellow]\n"
+            )
+            return
 
-    selected = _prompt_which_accounts(accounts, session_tracker)
-    if not selected:
-        console.print("[yellow]No accounts selected. Exiting.[/yellow]\n")
-        return
+        console.print(
+            f"\nFound [bold]{len(accounts)}[/bold] account(s) for "
+            f"[bold]{_provider_filter_label(cfg['APP_NAME'])}[/bold].\n"
+        )
+        _render_accounts_preview_table(accounts)
 
-    if not _prompt_yes_no(
-        f"\nProceed with [bold]{len(selected)}[/bold] selected account(s)? "
-        "(Bulk actions only affect this subset.)",
-        default=True,
-    ):
-        console.print("[yellow]Aborted by user.[/yellow]\n")
-        return
+        selected = _prompt_which_accounts(accounts, session_tracker)
+        if not selected:
+            console.print("[yellow]No accounts selected. Exiting.[/yellow]\n")
+            return
 
-    if fmt == "sqlite":
-        account_storage.sync_accounts_sqlite(output, selected)
-    else:
-        account_storage.sync_accounts_csv(output, selected)
-    console.print(f"Saved sync to [cyan]{output}[/cyan] ({fmt}).\n")
+        if not _prompt_yes_no(
+            f"\nProceed with [bold]{len(selected)}[/bold] selected account(s)? "
+            "(Bulk actions only affect this subset.)",
+            default=True,
+        ):
+            console.print("[yellow]Aborted by user.[/yellow]\n")
+            return
 
-    choice = Prompt.ask(
-        "What should we do for each account?",
-        choices=["rotate", "role", "both", "neither"],
-        default="neither",
-    )
+        if fmt == "sqlite":
+            account_storage.sync_accounts_sqlite(output, selected)
+        else:
+            account_storage.sync_accounts_csv(output, selected)
+        console.print(f"Saved sync to [cyan]{output}[/cyan] ({fmt}).\n")
 
-    if choice == "neither":
-        console.print("No API actions performed.")
-        return
+        choice = Prompt.ask(
+            "What should we do for each account?",
+            choices=["rotate", "role", "both", "neither"],
+            default="neither",
+        )
 
-    role_exclude_user_ids = (
-        _prompt_role_change_exclude_user_ids()
-        if choice in ("role", "both")
-        else frozenset()
-    )
+        if choice == "neither":
+            console.print("No API actions performed.")
+            return
 
-    run_started_at = datetime.now(timezone.utc).isoformat()
-    run_rotations, run_role_changes = _execute_bulk_account_actions(
-        cfg,
-        client,
-        session_tracker,
-        selected,
-        choice,
-        run_started_at=run_started_at,
-        role_exclude_user_ids=role_exclude_user_ids,
-    )
-    _maybe_prompt_export_report(
-        cfg,
-        session_tracker,
-        run_started_at=run_started_at,
-        run_rotations=run_rotations,
-        run_role_changes=run_role_changes,
-    )
+        role_exclude_user_ids = (
+            _prompt_role_change_exclude_user_ids()
+            if choice in ("role", "both")
+            else frozenset()
+        )
+
+        run_started_at = datetime.now(timezone.utc).isoformat()
+        run_rotations, run_role_changes = _execute_bulk_account_actions(
+            cfg,
+            client,
+            session_tracker,
+            selected,
+            choice,
+            run_started_at=run_started_at,
+            role_exclude_user_ids=role_exclude_user_ids,
+            verbose_log=verbose_log,
+        )
+        _maybe_prompt_export_report(
+            cfg,
+            session_tracker,
+            run_started_at=run_started_at,
+            run_rotations=run_rotations,
+            run_role_changes=run_role_changes,
+        )
+    finally:
+        if keeper is not None:
+            keeper.stop()
 
 
 _DEFAULT_SYNC_OUTPUT = Path("accounts.sqlite")
@@ -1232,6 +1357,7 @@ def _interactive_sync_impl(
     session_label: Optional[str],
     *,
     verbose: bool = False,
+    experimental_keep_browser_for_token: bool = False,
 ) -> None:
     fmt_norm = fmt.lower().strip()
     if fmt_norm not in ("sqlite", "csv"):
@@ -1257,6 +1383,7 @@ def _interactive_sync_impl(
         session_id=session_id,
         session_label=session_label,
         verbose_log=vlog,
+        experimental_keep_browser_for_token=experimental_keep_browser_for_token,
     )
 
 
@@ -1311,6 +1438,12 @@ def run(
         "-v",
         help="Log each Cerby API request/response (token redacted; large bodies truncated).",
     ),
+    experimental_keep_browser_for_token: bool = typer.Option(
+        False,
+        "--experimental-keep-browser-for-token",
+        envvar="CERBY_EXPERIMENTAL_KEEP_BROWSER",
+        help="TEMPORARY: after browser login, keep Chromium open and reload ~every 60s to persist new access_token to .cerby_session.json.",
+    ),
 ) -> None:
     _interactive_sync_impl(
         workspace,
@@ -1321,6 +1454,7 @@ def run(
         session_id,
         session_label,
         verbose=verbose,
+        experimental_keep_browser_for_token=experimental_keep_browser_for_token,
     )
 
 
@@ -1333,6 +1467,12 @@ def _cli_entry(
         "-v",
         help="Log each Cerby API request/response (token redacted; large bodies truncated).",
     ),
+    experimental_keep_browser_for_token: bool = typer.Option(
+        False,
+        "--experimental-keep-browser-for-token",
+        envvar="CERBY_EXPERIMENTAL_KEEP_BROWSER",
+        help="TEMPORARY: after browser login, keep Chromium open and reload ~every 60s to persist new access_token to .cerby_session.json.",
+    ),
 ) -> None:
     if ctx.invoked_subcommand is None:
         _interactive_sync_impl(
@@ -1344,6 +1484,7 @@ def _cli_entry(
             None,
             None,
             verbose=verbose,
+            experimental_keep_browser_for_token=experimental_keep_browser_for_token,
         )
 
 

@@ -7,6 +7,10 @@ import requests
 
 _VERBOSE_BODY_MAX = 10_000
 
+# GET …/auth/refresh — proactive refresh when JWT is within this many seconds of expiring.
+TOKEN_PROACTIVE_REFRESH_WITHIN_SECONDS = 15 * 60
+AUTH_REFRESH_URL = "https://api.cerby.com/v1/auth/refresh"
+
 
 def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
     h = dict(headers)
@@ -80,6 +84,45 @@ def fetch_accounts_merged(
     return [seen[k] for k in order]
 
 
+def refresh_access_token(
+    token: str,
+    workspace: str,
+    *,
+    verbose_log: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Exchange the current bearer token for a new one via ``GET /v1/auth/refresh``."""
+    ws = workspace.strip()
+    headers = {
+        "Authorization": f"Bearer {token.strip()}",
+        "Cerby-Workspace": ws,
+        "Content-Type": "application/json",
+    }
+    if verbose_log:
+        lines = [
+            f"GET {AUTH_REFRESH_URL}",
+            json.dumps(_redact_headers(dict(headers)), indent=2),
+        ]
+        verbose_log("\n".join(lines))
+    resp = requests.get(AUTH_REFRESH_URL, headers=headers, timeout=60)
+    if verbose_log:
+        status_line = f"<= {resp.status_code} {resp.reason or ''}".strip()
+        body = _truncate_body(resp.text)
+        try:
+            parsed = resp.json()
+            body = _truncate_body(json.dumps(parsed, indent=2, default=str))
+        except (ValueError, TypeError):
+            pass
+        verbose_log(f"{status_line}\n{body}")
+    resp.raise_for_status()
+    body = resp.json()
+    if not isinstance(body, dict):
+        raise ValueError("auth refresh response is not a JSON object")
+    new_tok = body.get("accessToken")
+    if not new_tok or not isinstance(new_tok, str) or not new_tok.strip():
+        raise ValueError("auth refresh response missing accessToken")
+    return new_tok.strip()
+
+
 def cerby_role_to_display_role(raw: str) -> str:
     # Cerby uses strings like account_owner; we normalize to OWNER / COLLABORATOR.
     s = (raw or "").strip()
@@ -119,6 +162,11 @@ class CerbyApi:
             "Cerby-Workspace": workspace,
         }
         self._verbose_log = verbose_log
+
+    def replace_token(self, new_token: str) -> None:
+        """Update bearer token for subsequent ``_request`` calls (e.g. after refresh)."""
+        self.token = new_token.strip()
+        self.headers["Authorization"] = f"Bearer {self.token}"
 
     def _request(
         self,
