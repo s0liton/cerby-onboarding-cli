@@ -1,0 +1,2 @@
+# Persistent runtime files are created here (.cerby_session.json, work_sessions/).
+# This file keeps the directory in git; contents are gitignored.

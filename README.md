@@ -1,150 +1,85 @@
 # Cerby Onboarding CLI
 
-CLI for syncing accounts from Cerby, rotating passwords, and bulk-updating user roles after self-onboarding (dashboard or browser extension). Sign-in uses a real browser; the tool stores only a short-lived API access token locally.
+Bulk rotate passwords and change user roles on Cerby accounts after self-onboarding. The tool fetches accounts that match your filters, then rotates passwords and/or downgrades owners to collaborators.
 
-## Introduction
+**Requires:** Python 3.12+, and a Cerby user who is a **super administrator with all access mode**.
 
-This tool helps you rotate passwords and change user roles for accounts managed in Cerby. There are many situations where you may need to bulk rotate passwords and change roles on shared and individually managed accounts. When users add their own accounts or Cerby captures their credentials, the user is automatically given OWNER permissions to that account. This reduces the security that Cerby provides since the user can modify the details of the account, share the account with others, reveal the password, and take other harmful actions against their account.
-
-This tool allows you to quickly act on multiple accounts at once so that:
-
-- The account password is rotated to a stronger value managed by Cerby.
-- Users are not able to reveal the password or change sensitive account settings when given collaborator access.
-
-## Features
-
-- Rotate Cerby account passwords for one or more integration types.
-- Change Cerby account assigned user's roles to "collaborator" or "owner".
-- Interactive browser login (Local credentials or whichever IdP is connected to your Cerby Workspace).
-- Work sessions — remember which accounts were already rotated or role-changed so you can safely re-run as more accounts are onboarded.
-- Per-run or overall session reports.
-- Automated Mode - Listens on an interval for new accounts of the specified types, and performs the actions you desire.
-- Exclude specific users from role changes.
-- Verbose logging.
-- Per-account granularity.
-
-## Requirements
-
-- **Python** 3.12 or newer.
-- **Cerby permissions** — the Cerby user whose session supplies the API token must be a **Super administrator** with **all access mode** enabled,
-
-## Installation
-
-Use **either** [uv](https://docs.astral.sh/uv/) **or** a normal **Python 3.12+ virtual environment with pip**.
-
-### 1. Clone and enter the repository
+## Install
 
 ```bash
 git clone <repository-url>
-cd <checkout-directory>
-```
-
-### 2a. Install with uv
-
-1. Install uv (see the [uv install guide](https://docs.astral.sh/uv/getting-started/installation/)).
-2. From the repo root, create the environment and install dependencies plus this project in editable form:
-
-```bash
+cd cerby-onboarding-cli
 uv sync
-```
-
-1. Install the Chromium build used for browser sign-in:
-
-```bash
 uv run playwright install chromium
 ```
 
-### 2b. Install with pip in a virtual environment
-
-1. Create a venv with Python 3.12+:
+<details>
+<summary>Install with pip instead of uv</summary>
 
 ```bash
 python3.12 -m venv .venv
-```
-
-1. **Activate** the venv:
-
-| Platform             | Command                      |
-| -------------------- | ---------------------------- |
-| macOS / Linux        | `source .venv/bin/activate`  |
-| Windows (cmd.exe)    | `.venv\Scripts\activate.bat` |
-| Windows (PowerShell) | `.venv\Scripts\Activate.ps1` |
-
-1. Upgrade pip and install this project in editable mode:
-
-```bash
-python -m pip install --upgrade pip
-python -m pip install -e .
-```
-
-1. With the venv **still activated**, install Chromium for Playwright:
-
-```bash
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .
 playwright install chromium
 ```
 
-## How to run
+</details>
 
-### If you use uv
+Run all commands below from the **repo root**.
+
+## Interactive mode
+
+Starts a step-by-step wizard. Choose **manual** (pick accounts once) or **automated** (poll for new accounts — good for short onboarding windows).
 
 ```bash
-# Interactive flow (default — same as the `run` subcommand)
-uv run python main.py
+uv run cerby-onboarding          # same as `run`
+uv run cerby-onboarding run \
+  --workspace mycompany \
+  --app-name slack \
+  --account-role COLLABORATOR
+```
 
-# Same thing via the installed console script
-uv run cerby-onboarding
+First run opens a browser to sign in. The token is saved to `assets/.cerby_session.json`.
 
-# Help
+**Work sessions** (`assets/work_sessions/`) track which accounts were already acted on, so re-runs skip them. On resume, automated mode delta-syncs accounts missed while offline.
+
+At the end of a run you can export a JSON report. Logs go to `log/cerby-onboarding.log`.
+
+## Service mode
+
+For long-running, unattended operation (e.g. systemd). Configuration lives in `config/config.yaml`.
+
+```bash
+cp config/config.example.yaml config/config.yaml
+# Edit: workspace, app_name, session_id, actions, poll_interval, etc.
+uv run cerby-onboarding service --config config/config.yaml
+```
+
+**Authentication** — use either:
+
+- A one-time `access_token` in `config/config.yaml` (removed from the file on first start), or
+- An existing `assets/.cerby_session.json` from a prior interactive run
+
+**systemd:** adjust paths in `deploy/cerby-onboarding.service`, then enable the unit.
+
+**Monitoring:** `log/cerby-onboarding.log` and `running_report.json` (updated while the service runs).
+
+## Runtime files
+
+| Path | Purpose |
+|------|---------|
+| `assets/.cerby_session.json` | API access token |
+| `assets/work_sessions/` | Per-run progress (rotations, role changes) |
+| `log/` | Application logs |
+| `running_report.json` | Live service summary |
+| `cerby_run_report_*.json` | Optional exports from interactive runs |
+
+Set `CERBY_DATA_DIR` to change the project root for logs/reports. Set `CERBY_ASSETS_DIR` to relocate `assets/`.
+
+## Help
+
+```bash
 uv run cerby-onboarding --help
 uv run cerby-onboarding run --help
+uv run cerby-onboarding service --help
 ```
-
-### If you use a pip virtual environment
-
-**Activate** the venv, then run:
-
-```bash
-# Interactive flow (default)
-python main.py
-
-# Console script (after pip install -e .)
-cerby-onboarding
-
-# Explicit subcommand
-python main.py run
-
-# Help
-cerby-onboarding --help
-cerby-onboarding run --help
-```
-
-## Adding `cerby-onboarding` to your PATH (optional)
-
-If you want to easily launch the tool using the `cerby-inboarding` command from your shell, add it to your PATH.
-
-| OS            | Folder to add to `PATH` (replace `<repo>` with your checkout’s absolute path) |
-| ------------- | ----------------------------------------------------------------------------- |
-| macOS / Linux | `<repo>/.venv/bin`                                                            |
-| Windows       | `<repo>\.venv\Scripts`                                                        |
-
-### macOS and Linux
-
-1. Open your shell's config (`~/.zshrc` for zsh, `~/.bashrc` for bash).
-2. Append (edit the path to match your machine):
-
-```bash
- export PATH="/absolute/path/to/your/checkout/.venv/bin:$PATH"
-```
-
-3. Reload the file (`source ~/.zshrc`, etc.) or open a new terminal.
-4. Check: `cerby-onboarding --help`
-
-### Windows
-
-1. Open **Settings → System → About → Advanced system settings** (or search **“environment variables”**).
-2. **Environment Variables…** → under _User variables_, select **Path** → **Edit** → **New**.
-3. Add the **Scripts** folder, e.g. `C:\absolute\path\to\your\checkout\.venv\Scripts` (the folder, not the `.exe`).
-4. Confirm with **OK**, then open a **new** Command Prompt or PowerShell.
-5. Check: `cerby-onboarding --help`
-
-

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, TypedDict
 
-SESSION_PATH = Path(__file__).resolve().parent / ".cerby_session.json"
+from cerby_onboarding.paths import session_file
 
 
 class SessionData(TypedDict):
@@ -15,10 +14,11 @@ class SessionData(TypedDict):
 
 
 def load_session() -> SessionData | None:
-    if not SESSION_PATH.exists():
+    path = session_file()
+    if not path.is_file():
         return None
     try:
-        raw: Any = json.loads(SESSION_PATH.read_text(encoding="utf-8"))
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             return None
         ws = raw.get("workspace")
@@ -31,22 +31,24 @@ def load_session() -> SessionData | None:
 
 
 def last_saved_workspace() -> str | None:
-    """Workspace from ``.cerby_session.json`` (last successful sign-in), even if the JWT is expired."""
+    """Workspace from ``assets/.cerby_session.json``, even if the JWT is expired."""
     data = load_session()
     return data["workspace"] if data else None
 
 
 def save_session(workspace: str, access_token: str) -> None:
+    path = session_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
     data = {"workspace": workspace.strip(), "access_token": access_token.strip()}
-    SESSION_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     try:
-        SESSION_PATH.chmod(0o600)
+        path.chmod(0o600)
     except OSError:
         pass
 
 
 def clear_session() -> None:
     try:
-        SESSION_PATH.unlink(missing_ok=True)
+        session_file().unlink(missing_ok=True)
     except OSError:
         pass
