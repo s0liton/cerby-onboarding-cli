@@ -7,7 +7,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-import token_session
+from cerby_onboarding import token_session
 
 
 def _transient_evaluate_error(exc: BaseException) -> bool:

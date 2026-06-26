@@ -1,4 +1,4 @@
-"""Persist work session state (rotations + role changes) as JSON under ``work_sessions/``.
+"""Persist work session state (rotations + role changes) as JSON under ``assets/work_sessions/``.
 
 Older session files may omit ``rotation_events`` / ``role_change_events``; list counts fall
 back to ``rotated_account_ids`` / ``role_changed_account_ids``.
@@ -11,13 +11,29 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from cerby_client import parse_provider_specs
+from cerby_onboarding.cerby_client import parse_provider_specs
+from cerby_onboarding.paths import work_sessions_dir
 
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: str | None) -> Optional[datetime]:
+    if not value or not str(value).strip():
+        return None
+    s = str(value).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _ensure_schema(data: dict[str, Any]) -> None:
@@ -98,7 +114,7 @@ class WorkSessionTracker:
             "rotation_events": [],
             "role_change_events": [],
         }
-        return cls(path=Path("work_sessions") / f"{sid}.json", data=data)
+        return cls(path=work_sessions_dir() / f"{sid}.json", data=data)
 
     @classmethod
     def load(cls, path: Path | str) -> WorkSessionTracker:
@@ -159,13 +175,27 @@ class WorkSessionTracker:
     def has_role_changed(self, account_id: str) -> bool:
         return str(account_id) in self.role_changed_ids()
 
+    def last_successful_action_at(self) -> Optional[datetime]:
+        """Latest ``at`` timestamp from rotation or role-change events (successes only)."""
+        timestamps: list[datetime] = []
+        for key in ("rotation_events", "role_change_events"):
+            for ev in self.data.get(key) or []:
+                if not isinstance(ev, dict):
+                    continue
+                dt = _parse_iso_datetime(str(ev.get("at") or ""))
+                if dt is not None:
+                    timestamps.append(dt)
+        if not timestamps:
+            return None
+        return max(timestamps)
+
 
 def load_session_for_workspace_app(session_id: str, workspace: str, app_name: str) -> WorkSessionTracker:
     """Load ``work_sessions/<id>.json`` and verify workspace + app."""
     sid = str(session_id).strip()
     if not sid:
         raise ValueError("session id is empty")
-    path = Path("work_sessions") / (sid if sid.endswith(".json") else f"{sid}.json")
+    path = work_sessions_dir() / (sid if sid.endswith(".json") else f"{sid}.json")
     if not path.is_file():
         raise ValueError(f"Work session file not found: {path}")
     t = WorkSessionTracker.load(path)
@@ -181,7 +211,7 @@ def load_session_for_workspace_app(session_id: str, workspace: str, app_name: st
 
 def list_matching_sessions(workspace: str, app_name: str) -> list[SessionListEntry]:
     # Same workspace plus overlapping provider set (not only an exact app_name string).
-    root = Path("work_sessions")
+    root = work_sessions_dir()
     if not root.is_dir():
         return []
     rows: list[SessionListEntry] = []

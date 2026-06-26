@@ -1,0 +1,26 @@
+# Cerby Onboarding CLI — service configuration
+# Copy to config/config.yaml and edit. Used by: cerby-onboarding service --config config/config.yaml
+#
+# Bootstrap (pick one):
+#   • Set access_token below — consumed on first service start, then removed from this file.
+#   • Or sign in interactively once so assets/.cerby_session.json exists.
+
+workspace: mycompany
+app_name: slack
+account_role: COLLABORATOR
+
+# One-time bootstrap bearer token (optional). Removed from this file after first successful load.
+# access_token: ""
+
+session_id: REPLACE_WITH_SESSION_ID
+
+actions: both          # rotate | role | both
+poll_interval: 30s
+role_exclude_user_ids: []
+
+# log_file → under project root (or CERBY_DATA_DIR). running_report → project root.
+log_file: log/cerby-onboarding.log
+running_report: running_report.json
+
+experimental_keep_browser_for_token: true
+verbose_http: false

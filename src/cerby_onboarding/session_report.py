@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from cerby_client import cerby_role_to_display_role
+from cerby_onboarding.cerby_client import cerby_role_to_display_role
 
 
 def _iso_now() -> str:

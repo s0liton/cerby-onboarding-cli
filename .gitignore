@@ -1,3 +1,9 @@
+# Build artifacts
+*.egg-info/
+src/*.egg-info/
+cerby_onboarding_cli.egg-info/
+cerby_rotation_tool.egg-info/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -13,14 +19,19 @@ wheels/
 # Virtual environments
 .venv
 
-# Saved API session (never commit)
-.cerby_session.json
+# Local service config (may contain access_token bootstrap)
+config/config.yaml
 
-# Work session progress (local only)
-work_sessions/
+# Important persistent state (keep assets/.gitkeep)
+assets/.cerby_session.json
+assets/work_sessions/
 
-# Local exports and default DB from runs
+# User-exported reports (project root)
 cerby_run_report_*.json
 cerby_work_session_*.json
-accounts.sqlite
-*.sqlite
+
+# Service live report (project root)
+running_report.json
+
+# Runtime logs
+log/
