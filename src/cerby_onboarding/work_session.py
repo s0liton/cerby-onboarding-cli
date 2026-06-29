@@ -290,6 +290,24 @@ def load_session_by_name(session_name: str, workspace: str, app_name: str) -> Wo
     )
 
 
+def load_or_create_session_by_name(
+    session_name: str, workspace: str, app_name: str
+) -> tuple[WorkSessionTracker, bool]:
+    """Load a work session, creating ``assets/work_sessions/<slug>.json`` if missing.
+
+    Returns ``(tracker, created)`` where ``created`` is true when a new file was written.
+    """
+    try:
+        return load_session_by_name(session_name, workspace, app_name), False
+    except ValueError as e:
+        if not str(e).startswith("Work session not found:"):
+            raise
+    name = normalize_session_name(session_name)
+    tracker = WorkSessionTracker.begin_new(workspace, app_name, name)
+    tracker.save()
+    return tracker, True
+
+
 def load_session_for_workspace_app(session_name: str, workspace: str, app_name: str) -> WorkSessionTracker:
     """Alias for :func:`load_session_by_name`."""
     return load_session_by_name(session_name, workspace, app_name)

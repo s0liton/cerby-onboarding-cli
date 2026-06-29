@@ -5,7 +5,8 @@
 #   • Set access_token below — consumed on first service start, then removed from this file.
 #   • Or sign in interactively once so assets/.cerby_session.json exists.
 #
-# Create the work session name interactively first (manual or automated run), then reference it here.
+# Work session: service mode creates assets/work_sessions/<session_name>.json automatically
+# on first start if it does not exist (default session name: production).
 
 workspace: mycompany
 
@@ -20,8 +21,8 @@ account_role: COLLABORATOR
 # One-time bootstrap bearer token (optional). Removed from this file after first successful load.
 # access_token: ""
 
-# Must match an existing work session (unique name; created via interactive run).
-session_name: production-onboarding
+# Work session tracked under assets/work_sessions/ (created automatically in service mode).
+session_name: production
 
 actions: both          # rotate | role | both
 poll_interval: 30s

@@ -35,6 +35,7 @@ from cerby_onboarding.cerby_client import (
 )
 from cerby_onboarding.run_context import ActiveRun
 from cerby_onboarding.paths import (
+    data_dir,
     ensure_assets_dir,
     ensure_log_dir,
 )
@@ -1455,21 +1456,39 @@ def _interactive_sync_impl(
 
 
 def _run_service_impl(config_path: Path) -> None:
+    config_path = config_path.resolve()
+    ensure_assets_dir()
+    ensure_log_dir()
+
+    default_log = (data_dir() / DEFAULT_LOG_FILE).resolve()
+    active = _build_active_run(default_log, interactive=False, mirror_stderr=True)
+    active.log_info("Cerby onboarding service starting", config=str(config_path))
+
     try:
         svc = load_service_config(config_path)
     except (OSError, ValueError) as e:
+        active.log_error("Failed to load service config", error=str(e))
         raise typer.BadParameter(str(e)) from e
 
+    configured_log = svc.log_file.resolve()
     running_report = RunningReportWriter(svc.running_report)
-    active = _build_active_run(
-        svc.log_file,
-        interactive=False,
-        running_report=running_report,
-        mirror_stderr=True,
+    if configured_log != default_log:
+        active = _build_active_run(
+            configured_log,
+            interactive=False,
+            running_report=running_report,
+            mirror_stderr=True,
+        )
+    else:
+        active.running_report = running_report
+    active.log_info(
+        "Service config loaded",
+        workspace=svc.workspace,
+        session_name=svc.session_name,
+        log_file=str(configured_log),
     )
+
     cfg = svc.run_cfg()
-    ensure_assets_dir()
-    ensure_log_dir()
 
     bootstrap = consume_bootstrap_token(svc.config_path)
     if bootstrap:
@@ -1479,12 +1498,25 @@ def _run_service_impl(config_path: Path) -> None:
         )
 
     try:
-        session_tracker = work_session.load_session_by_name(
+        session_tracker, created = work_session.load_or_create_session_by_name(
             svc.session_name, cfg["CERBY_WORKSPACE"], cfg["APP_NAME"]
         )
     except ValueError as e:
-        active.log_error(str(e))
+        active.log_error("Work session error", error=str(e))
         raise typer.BadParameter(str(e)) from e
+
+    if created:
+        active.log_info(
+            "Created work session",
+            session_name=session_tracker.session_name,
+            path=str(session_tracker.path.resolve()),
+        )
+    else:
+        active.log_info(
+            "Using existing work session",
+            session_name=session_tracker.session_name,
+            path=str(session_tracker.path.resolve()),
+        )
 
     poll_interval_sec = _parse_poll_interval_seconds(svc.poll_interval)
     vlog: Optional[Callable[[str], None]] = (
@@ -1542,6 +1574,7 @@ def _run_service_impl(config_path: Path) -> None:
         )
     except typer.Exit:
         stop_reason = "error"
+        active.log_error("Service exiting with error")
         raise
     except Exception as e:
         stop_reason = "error"

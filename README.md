@@ -61,11 +61,11 @@ uv run cerby-onboarding service --config config/config.yaml
 - A one-time `access_token` in `config/config.yaml` (removed from the file on first start), or
 - An existing `assets/.cerby_session.json` from a prior interactive run
 
-Create the work session interactively first (pick a unique **session name**), then set the same `session_name` in config.
+**Work session** — service mode uses `session_name` from config (default: `production`) and creates `assets/work_sessions/<name>.json` automatically on first start. Interactive mode still prompts for session names as before.
 
-**systemd:** adjust paths in `deploy/cerby-onboarding.service`, then enable the unit.
+**systemd:** set `WorkingDirectory` to the project root and adjust paths in `deploy/cerby-onboarding.service`, then enable the unit. Service logs are written to `log/cerby-onboarding.log` and mirrored to stderr (visible in `journalctl`).
 
-**Monitoring:** `log/cerby-onboarding.log` and `running_report.json` (updated while the service runs).
+**Monitoring:** `log/cerby-onboarding.log`, `journalctl -u cerby-onboarding.service`, and `running_report.json` (updated while the service runs).
 
 ## Runtime files
 

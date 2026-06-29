@@ -10,10 +10,12 @@ import yaml
 
 from cerby_onboarding.cerby_client import normalize_provider_filter, parse_provider_specs
 from cerby_onboarding.paths import DEFAULT_LOG_FILE, DEFAULT_RUNNING_REPORT, data_dir
+from cerby_onboarding.work_session import normalize_session_name
 
 VALID_ACTIONS = frozenset({"rotate", "role", "both"})
 VALID_ROLES = frozenset({"OWNER", "COLLABORATOR"})
 BOOTSTRAP_TOKEN_KEYS = ("access_token", "initial_access_token")
+DEFAULT_SESSION_NAME = "production"
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,17 @@ def load_service_config(config_path: Path | str) -> ServiceConfig:
     workspace = _require_str(raw, "workspace")
     app_name = parse_app_names_config(raw)
 
-    session_name = _require_str(raw, "session_name")
+    session_raw = raw.get("session_name")
+    if session_raw is None or (isinstance(session_raw, str) and not session_raw.strip()):
+        session_name = DEFAULT_SESSION_NAME
+    elif isinstance(session_raw, str):
+        session_name = session_raw.strip()
+    else:
+        raise ValueError("config: session_name must be a string")
+    try:
+        session_name = normalize_session_name(session_name)
+    except ValueError as e:
+        raise ValueError(f"config: {e}") from e
     if raw.get("session_id"):
         raise ValueError(
             "config: session_id is no longer supported; use session_name instead"
