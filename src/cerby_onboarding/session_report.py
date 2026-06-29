@@ -13,10 +13,10 @@ def _iso_now() -> str:
 
 
 def work_session_display_name(session_data: dict[str, Any]) -> str:
-    """Human-facing session name: label when set, otherwise session id."""
-    label = (session_data.get("label") or "").strip()
-    sid = str(session_data.get("session_id") or "").strip()
-    return label if label else sid
+    """Human-facing session name."""
+    from cerby_onboarding.work_session import session_name_from_data
+
+    return session_name_from_data(session_data)
 
 
 def _summarize_run(
@@ -124,7 +124,7 @@ def build_this_run_export(
     *,
     workspace: str,
     app_name: str,
-    session_id: str | None,
+    session_name: str | None,
     work_session_display_name: str,
     run_started_at: str,
     rotations: list[dict[str, Any]],
@@ -138,7 +138,7 @@ def build_this_run_export(
         "generated_at": _iso_now(),
         "workspace": workspace,
         "app_name": app_name,
-        "work_session_id": session_id,
+        "work_session_name": session_name,
         "work_session_display_name": work_session_display_name,
         "summary": _summarize_run(rotations, role_changes),
         "run_started_at": run_started_at,

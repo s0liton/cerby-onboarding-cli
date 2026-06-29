@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from cerby_onboarding.cerby_client import normalize_provider_filter, parse_provider_specs
 from cerby_onboarding.paths import DEFAULT_LOG_FILE, DEFAULT_RUNNING_REPORT, data_dir
 
 VALID_ACTIONS = frozenset({"rotate", "role", "both"})
@@ -20,7 +21,7 @@ class ServiceConfig:
     workspace: str
     app_name: str
     account_role: str
-    session_id: str
+    session_name: str
     actions: str
     poll_interval: str
     role_exclude_user_ids: frozenset[str]
@@ -55,6 +56,36 @@ def _resolve_path(raw: str | None, default: Path) -> Path:
     return (base / p).resolve()
 
 
+def _app_specs_from_value(value: Any, *, field: str) -> list[str]:
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if not text:
+                continue
+            parts.extend(parse_provider_specs(text))
+        return parts
+    if isinstance(value, str):
+        return parse_provider_specs(value)
+    raise ValueError(f"config: {field} must be a string or list of strings")
+
+
+def parse_app_names_config(raw: dict[str, Any]) -> str:
+    """Normalize ``app_name`` / ``app_names`` to the comma-separated runtime string."""
+    if raw.get("app_names") is not None:
+        specs = _app_specs_from_value(raw["app_names"], field="app_names")
+    elif raw.get("app_name") is not None:
+        specs = _app_specs_from_value(raw["app_name"], field="app_name")
+    else:
+        raise ValueError("config: app_name or app_names is required")
+
+    concrete = [normalize_provider_filter(s) for s in specs if str(s).strip()]
+    concrete = [s for s in concrete if s]
+    if not concrete:
+        return "Any"
+    return ",".join(dict.fromkeys(concrete))
+
+
 def load_service_config(config_path: Path | str) -> ServiceConfig:
     path = Path(config_path).resolve()
     if not path.is_file():
@@ -65,8 +96,13 @@ def load_service_config(config_path: Path | str) -> ServiceConfig:
     raw: dict[str, Any] = raw_any
 
     workspace = _require_str(raw, "workspace")
-    app_name = _require_str(raw, "app_name")
-    session_id = _require_str(raw, "session_id")
+    app_name = parse_app_names_config(raw)
+
+    session_name = _require_str(raw, "session_name")
+    if raw.get("session_id"):
+        raise ValueError(
+            "config: session_id is no longer supported; use session_name instead"
+        )
 
     role_raw = str(raw.get("account_role") or "COLLABORATOR").strip().upper()
     if role_raw not in VALID_ROLES:
@@ -101,7 +137,7 @@ def load_service_config(config_path: Path | str) -> ServiceConfig:
         workspace=workspace,
         app_name=app_name,
         account_role=role_raw,
-        session_id=session_id,
+        session_name=session_name,
         actions=actions,
         poll_interval=poll_interval,
         role_exclude_user_ids=exclude_ids,
@@ -114,7 +150,6 @@ def load_service_config(config_path: Path | str) -> ServiceConfig:
 
 
 def consume_bootstrap_token(config_path: Path | str) -> str | None:
-    """Load a one-time ``access_token`` from config, remove it from the file, return the token."""
     path = Path(config_path).resolve()
     if not path.is_file():
         return None

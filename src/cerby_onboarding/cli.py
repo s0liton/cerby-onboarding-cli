@@ -341,35 +341,58 @@ def _prompt_which_accounts(
     return [accounts[i - 1] for i in picks]
 
 
-def _resolve_new_session_label(session_label: Optional[str]) -> str:
-    if session_label is not None and str(session_label).strip():
-        return str(session_label).strip()
-    return Prompt.ask("Session label (optional)", default="").strip()
+def _prompt_new_session_name(session_name: Optional[str]) -> str:
+    if session_name is not None and str(session_name).strip():
+        try:
+            name = work_session.normalize_session_name(str(session_name).strip())
+        except ValueError as e:
+            raise typer.BadParameter(str(e)) from e
+        if work_session.session_name_taken(name):
+            raise typer.BadParameter(f"Work session name already exists: {name!r}")
+        return name
+    while True:
+        raw = Prompt.ask("Session name (must be unique)", default="").strip()
+        if not raw:
+            console.print("[red]Session name is required.[/red]")
+            continue
+        try:
+            name = work_session.normalize_session_name(raw)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            continue
+        if work_session.session_name_taken(name):
+            console.print(f"[red]Session name already in use: {name!r}[/red]")
+            continue
+        return name
+
+
+def _begin_new_session(ws: str, app: str, session_name: str) -> work_session.WorkSessionTracker:
+    try:
+        t = work_session.WorkSessionTracker.begin_new(ws, app, session_name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    console.print(f"[green]New session[/green] [cyan]{t.session_name}[/cyan]\n")
+    return t
 
 
 def _prompt_work_session_tracker(
     ws: str,
     app: str,
     *,
-    session_id: Optional[str],
-    session_label: Optional[str],
+    session_name: Optional[str],
 ) -> work_session.WorkSessionTracker:
-    # --session-id skips this; otherwise pick new vs continue and maybe a label.
-    if session_id is not None and str(session_id).strip():
-        sid = str(session_id).strip()
+    if session_name is not None and str(session_name).strip():
         try:
-            t = work_session.load_session_for_workspace_app(sid, ws, app)
+            t = work_session.load_session_by_name(str(session_name).strip(), ws, app)
         except ValueError as e:
             raise typer.BadParameter(str(e)) from e
-        console.print(f"[green]Session[/green] [cyan]{t.data['session_id']}[/cyan]\n")
+        console.print(f"[green]Session[/green] [cyan]{t.session_name}[/cyan]\n")
         return t
 
     candidates = work_session.list_matching_sessions(ws, app)
     if not candidates:
-        label = _resolve_new_session_label(session_label)
-        t = work_session.WorkSessionTracker.begin_new(ws, app, label=label)
-        console.print(f"[green]New session[/green] [cyan]{t.data['session_id']}[/cyan]\n")
-        return t
+        name = _prompt_new_session_name(None)
+        return _begin_new_session(ws, app, name)
 
     mode = Prompt.ask(
         "Work session",
@@ -377,26 +400,21 @@ def _prompt_work_session_tracker(
         default="continue",
     )
     if mode == "new":
-        label = _resolve_new_session_label(session_label)
-        t = work_session.WorkSessionTracker.begin_new(ws, app, label=label)
-        console.print(f"[green]New session[/green] [cyan]{t.data['session_id']}[/cyan]\n")
-        return t
+        name = _prompt_new_session_name(None)
+        return _begin_new_session(ws, app, name)
 
     sess_table = Table(title="Saved sessions")
     sess_table.add_column("#", justify="right")
-    sess_table.add_column("Label")
-    sess_table.add_column("Session id")
-    sess_table.add_column("App scope (when saved)", overflow="fold")
+    sess_table.add_column("Name")
+    sess_table.add_column("App scope", overflow="fold")
     sess_table.add_column("Last updated")
     sess_table.add_column("Rotated")
     sess_table.add_column("Role-changed")
     for i, entry in enumerate(candidates, start=1):
-        lab = entry.label if entry.label else "—"
         scope = entry.session_app_name.strip() if entry.session_app_name.strip() else "—"
         sess_table.add_row(
             str(i),
-            lab,
-            entry.session_id,
+            entry.session_name,
             scope,
             entry.updated_at[:19] if entry.updated_at else "—",
             str(entry.rotated_count),
@@ -413,7 +431,7 @@ def _prompt_work_session_tracker(
             picked = candidates[int(n) - 1]
             t = work_session.WorkSessionTracker.load(picked.path)
             console.print(
-                f"[green]Continuing[/green] [cyan]{t.data['session_id']}[/cyan] "
+                f"[green]Continuing[/green] [cyan]{t.session_name}[/cyan] "
                 f"({picked.rotated_count} rotated, {picked.role_changed_count} role-changed).\n"
             )
             return t
@@ -1055,13 +1073,13 @@ def _maybe_prompt_export_report(
     )
     if ex == "neither":
         return
-    sid = str(session_tracker.data.get("session_id") or "session")
+    sname = work_session.session_name_slug(session_tracker.session_name)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if ex == "this_run":
         payload = session_report.build_this_run_export(
             workspace=cfg["CERBY_WORKSPACE"],
             app_name=cfg["APP_NAME"],
-            session_id=sid,
+            session_name=session_tracker.session_name,
             work_session_display_name=session_report.work_session_display_name(
                 session_tracker.data
             ),
@@ -1069,10 +1087,10 @@ def _maybe_prompt_export_report(
             rotations=run_rotations,
             role_changes=run_role_changes,
         )
-        default_path = Path.cwd() / f"cerby_run_report_{sid}_{ts}.json"
+        default_path = Path.cwd() / f"cerby_run_report_{sname}_{ts}.json"
     else:
         payload = session_report.build_full_session_export(session_tracker.data)
-        default_path = Path.cwd() / f"cerby_work_session_{sid}_{ts}.json"
+        default_path = Path.cwd() / f"cerby_work_session_{sname}_{ts}.json"
     out = Prompt.ask("Write report to", default=str(default_path)).strip()
     if not out:
         console.print("[yellow]No path given; skipping export.[/yellow]")
@@ -1284,8 +1302,7 @@ def _build_active_run(
 def _run_flow(
     cfg: dict[str, str],
     *,
-    session_id: Optional[str] = None,
-    session_label: Optional[str] = None,
+    session_name: Optional[str] = None,
     verbose_log: Optional[Callable[[str], None]] = None,
     experimental_keep_browser_for_token: bool = False,
     active: ActiveRun | None = None,
@@ -1321,8 +1338,7 @@ def _run_flow(
         session_tracker = _prompt_work_session_tracker(
             cfg["CERBY_WORKSPACE"],
             cfg["APP_NAME"],
-            session_id=session_id,
-            session_label=session_label,
+            session_name=session_name,
         )
 
         run_mode = Prompt.ask(
@@ -1410,8 +1426,7 @@ def _interactive_sync_impl(
     workspace: Optional[str],
     app_name: Optional[str],
     account_role: Optional[str],
-    session_id: Optional[str],
-    session_label: Optional[str],
+    session_name: Optional[str],
     *,
     verbose: bool = False,
     experimental_keep_browser_for_token: bool = False,
@@ -1432,8 +1447,7 @@ def _interactive_sync_impl(
 
     _run_flow(
         cfg,
-        session_id=session_id,
-        session_label=session_label,
+        session_name=session_name,
         verbose_log=vlog,
         experimental_keep_browser_for_token=experimental_keep_browser_for_token,
         active=active,
@@ -1465,8 +1479,8 @@ def _run_service_impl(config_path: Path) -> None:
         )
 
     try:
-        session_tracker = work_session.load_session_for_workspace_app(
-            svc.session_id, cfg["CERBY_WORKSPACE"], cfg["APP_NAME"]
+        session_tracker = work_session.load_session_by_name(
+            svc.session_name, cfg["CERBY_WORKSPACE"], cfg["APP_NAME"]
         )
     except ValueError as e:
         active.log_error(str(e))
@@ -1573,17 +1587,11 @@ def run(
         envvar="ACCOUNT_ROLE",
         help="Default for the role prompt: OWNER or COLLABORATOR.",
     ),
-    session_id: Optional[str] = typer.Option(
+    session_name: Optional[str] = typer.Option(
         None,
-        "--session-id",
-        envvar="CERBY_SESSION_ID",
-        help="Load this work session id (under assets/work_sessions/) without prompts; must match workspace + app.",
-    ),
-    session_label: Optional[str] = typer.Option(
-        None,
-        "--session-label",
-        envvar="CERBY_SESSION_LABEL",
-        help="Optional label for a new work session (ignored when --session-id is set).",
+        "--session-name",
+        envvar="CERBY_SESSION_NAME",
+        help="Load this work session by name (under assets/work_sessions/) without prompts.",
     ),
     verbose: bool = typer.Option(
         False,
@@ -1607,8 +1615,7 @@ def run(
         workspace,
         app_name,
         account_role,
-        session_id,
-        session_label,
+        session_name,
         verbose=verbose,
         experimental_keep_browser_for_token=experimental_keep_browser_for_token,
         log_file=log_file,
@@ -1633,7 +1640,6 @@ def _cli_entry(
 ) -> None:
     if ctx.invoked_subcommand is None:
         _interactive_sync_impl(
-            None,
             None,
             None,
             None,
