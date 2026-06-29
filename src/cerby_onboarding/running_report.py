@@ -39,7 +39,7 @@ class RunningReportWriter:
         poll_interval: str,
         role_exclude_user_ids: list[str],
     ) -> None:
-        sid = str(session_tracker_data.get("session_id") or "")
+        session_name = work_session_display_name(session_tracker_data)
         self._data = {
             "report_kind": "service_running",
             "status": "running",
@@ -48,7 +48,7 @@ class RunningReportWriter:
             "workspace": workspace,
             "app_name": app_name,
             "account_role": account_role,
-            "work_session_id": sid,
+            "work_session_name": session_name,
             "work_session_display_name": work_session_display_name(session_tracker_data),
             "actions": actions,
             "poll_interval": poll_interval,

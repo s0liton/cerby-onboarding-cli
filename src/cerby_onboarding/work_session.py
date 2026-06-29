@@ -1,13 +1,9 @@
-"""Persist work session state (rotations + role changes) as JSON under ``assets/work_sessions/``.
-
-Older session files may omit ``rotation_events`` / ``role_change_events``; list counts fall
-back to ``rotated_account_ids`` / ``role_changed_account_ids``.
-"""
+"""Persist work session state (rotations + role changes) as JSON under ``assets/work_sessions/``."""
 
 from __future__ import annotations
 
 import json
-import uuid
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,25 +39,67 @@ def _ensure_schema(data: dict[str, Any]) -> None:
     data.setdefault("role_change_events", [])
 
 
+def normalize_session_name(name: str) -> str:
+    n = str(name).strip()
+    if not n:
+        raise ValueError("session name is required")
+    if len(n) > 120:
+        raise ValueError("session name must be at most 120 characters")
+    return n
+
+
+def session_name_slug(name: str) -> str:
+    n = normalize_session_name(name)
+    slug = re.sub(r"[^\w\s-]", "", n.lower())
+    slug = re.sub(r"[\s_]+", "-", slug).strip("-")
+    if not slug:
+        raise ValueError("session name must contain at least one letter or number")
+    return slug
+
+
+def session_name_from_data(data: dict[str, Any], path: Path | None = None) -> str:
+    for key in ("session_name", "label"):
+        val = (data.get(key) or "").strip() if isinstance(data.get(key), str) else ""
+        if val:
+            return val
+    if path is not None:
+        return path.stem
+    sid = str(data.get("session_id") or "").strip()
+    return sid or "—"
+
+
+def session_name_taken(name: str) -> bool:
+    want = normalize_session_name(name).casefold()
+    root = work_sessions_dir()
+    if not root.is_dir():
+        return False
+    for p in root.glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if session_name_from_data(data, p).casefold() == want:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class SessionListEntry:
     path: Path
-    session_id: str
-    label: str
+    session_name: str
     updated_at: str
     rotated_count: int
     role_changed_count: int
-    # What was stored when the session started (can be several comma-separated providers).
     session_app_name: str = ""
 
 
 def _provider_set(app_raw: str) -> frozenset[str]:
-    """Non-empty provider ids from a comma-separated app string (same rules as API prompts)."""
     return frozenset(s for s in parse_provider_specs(app_raw) if s)
 
 
 def session_app_matches_current(session_app: str, current_app: str) -> bool:
-    # Overlap on comma-separated providers; "Any" (no concrete ids) on a side = wildcard.
     saved = _provider_set(session_app)
     current = _provider_set(current_app)
     if not saved and not current:
@@ -78,9 +116,12 @@ class WorkSessionTracker:
         self.path = path
         self.data = data
 
+    @property
+    def session_name(self) -> str:
+        return session_name_from_data(self.data, self.path)
+
     def display_label(self) -> str:
-        lab = (self.data.get("label") or "").strip()
-        return lab if lab else "—"
+        return self.session_name
 
     def rotated_ids(self) -> set[str]:
         return {str(x) for x in (self.data.get("rotated_account_ids") or [])}
@@ -89,22 +130,24 @@ class WorkSessionTracker:
         return {str(x) for x in (self.data.get("role_changed_account_ids") or [])}
 
     def is_persisted(self) -> bool:
-        """True once the session file has been written (first successful rotate or role change)."""
         return self.path.is_file()
 
     @classmethod
-    def begin_new(
-        cls,
-        workspace: str,
-        app_name: str,
-        label: str = "",
-        session_id: str | None = None,
-    ) -> WorkSessionTracker:
-        sid = session_id or uuid.uuid4().hex[:12]
+    def begin_new(cls, workspace: str, app_name: str, session_name: str) -> WorkSessionTracker:
+        name = normalize_session_name(session_name)
+        if session_name_taken(name):
+            raise ValueError(
+                f"Work session name already exists: {name!r}. Choose a different name."
+            )
+        slug = session_name_slug(name)
+        path = work_sessions_dir() / f"{slug}.json"
+        if path.exists():
+            raise ValueError(
+                f"Work session file already exists: {path}. Choose a different session name."
+            )
         now = _iso_now()
         data: dict[str, Any] = {
-            "session_id": sid,
-            "label": label.strip(),
+            "session_name": name,
             "workspace": workspace,
             "app_name": app_name,
             "created_at": now,
@@ -114,7 +157,7 @@ class WorkSessionTracker:
             "rotation_events": [],
             "role_change_events": [],
         }
-        return cls(path=work_sessions_dir() / f"{sid}.json", data=data)
+        return cls(path=path, data=data)
 
     @classmethod
     def load(cls, path: Path | str) -> WorkSessionTracker:
@@ -123,10 +166,20 @@ class WorkSessionTracker:
         if not isinstance(raw, dict):
             raise ValueError("session file must be a JSON object")
         _ensure_schema(raw)
+        if not (raw.get("session_name") or raw.get("label")):
+            raw.setdefault("session_name", p.stem)
         return cls(path=p, data=raw)
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists() and self.path.stat().st_size > 0:
+            existing = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                old_name = session_name_from_data(existing, self.path)
+                new_name = session_name_from_data(self.data, self.path)
+                if old_name.casefold() != new_name.casefold():
+                    raise ValueError("session name cannot be changed after creation")
+        self.data["session_name"] = self.session_name
         self.data["updated_at"] = _iso_now()
         self.path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -176,7 +229,6 @@ class WorkSessionTracker:
         return str(account_id) in self.role_changed_ids()
 
     def last_successful_action_at(self) -> Optional[datetime]:
-        """Latest ``at`` timestamp from rotation or role-change events (successes only)."""
         timestamps: list[datetime] = []
         for key in ("rotation_events", "role_change_events"):
             for ev in self.data.get(key) or []:
@@ -190,27 +242,78 @@ class WorkSessionTracker:
         return max(timestamps)
 
 
-def load_session_for_workspace_app(session_id: str, workspace: str, app_name: str) -> WorkSessionTracker:
-    """Load ``work_sessions/<id>.json`` and verify workspace + app."""
-    sid = str(session_id).strip()
-    if not sid:
-        raise ValueError("session id is empty")
-    path = work_sessions_dir() / (sid if sid.endswith(".json") else f"{sid}.json")
-    if not path.is_file():
-        raise ValueError(f"Work session file not found: {path}")
-    t = WorkSessionTracker.load(path)
-    if (t.data.get("workspace") or "") != workspace or not session_app_matches_current(
-        str(t.data.get("app_name") or ""), app_name
+def _verify_session_match(
+    tracker: WorkSessionTracker,
+    session_name: str,
+    workspace: str,
+    app_name: str,
+) -> None:
+    if tracker.session_name.casefold() != normalize_session_name(session_name).casefold():
+        raise ValueError(
+            f"Work session {tracker.session_name!r} does not match requested name {session_name!r}."
+        )
+    if (tracker.data.get("workspace") or "") != workspace or not session_app_matches_current(
+        str(tracker.data.get("app_name") or ""), app_name
     ):
         raise ValueError(
-            f"Session {t.data.get('session_id')} does not match this workspace ({workspace!r}) "
-            f"and app ({app_name!r})."
+            f"Work session {tracker.session_name!r} does not match workspace {workspace!r} "
+            f"and app filter {app_name!r}."
         )
-    return t
+
+
+def load_session_by_name(session_name: str, workspace: str, app_name: str) -> WorkSessionTracker:
+    """Load a work session by its unique ``session_name``."""
+    name = normalize_session_name(session_name)
+    slug_path = work_sessions_dir() / f"{session_name_slug(name)}.json"
+    if slug_path.is_file():
+        tracker = WorkSessionTracker.load(slug_path)
+        _verify_session_match(tracker, name, workspace, app_name)
+        return tracker
+
+    root = work_sessions_dir()
+    if root.is_dir():
+        for p in root.glob("*.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if session_name_from_data(data, p).casefold() != name.casefold():
+                continue
+            tracker = WorkSessionTracker.load(p)
+            _verify_session_match(tracker, name, workspace, app_name)
+            return tracker
+
+    raise ValueError(
+        f"Work session not found: {name!r} (looked under {work_sessions_dir()})"
+    )
+
+
+def load_or_create_session_by_name(
+    session_name: str, workspace: str, app_name: str
+) -> tuple[WorkSessionTracker, bool]:
+    """Load a work session, creating ``assets/work_sessions/<slug>.json`` if missing.
+
+    Returns ``(tracker, created)`` where ``created`` is true when a new file was written.
+    """
+    try:
+        return load_session_by_name(session_name, workspace, app_name), False
+    except ValueError as e:
+        if not str(e).startswith("Work session not found:"):
+            raise
+    name = normalize_session_name(session_name)
+    tracker = WorkSessionTracker.begin_new(workspace, app_name, name)
+    tracker.save()
+    return tracker, True
+
+
+def load_session_for_workspace_app(session_name: str, workspace: str, app_name: str) -> WorkSessionTracker:
+    """Alias for :func:`load_session_by_name`."""
+    return load_session_by_name(session_name, workspace, app_name)
 
 
 def list_matching_sessions(workspace: str, app_name: str) -> list[SessionListEntry]:
-    # Same workspace plus overlapping provider set (not only an exact app_name string).
     root = work_sessions_dir()
     if not root.is_dir():
         return []
@@ -235,8 +338,7 @@ def list_matching_sessions(workspace: str, app_name: str) -> list[SessionListEnt
         rows.append(
             SessionListEntry(
                 path=p,
-                session_id=str(data.get("session_id") or p.stem),
-                label=str(data.get("label") or ""),
+                session_name=session_name_from_data(data, p),
                 updated_at=str(data.get("updated_at") or ""),
                 rotated_count=len(rot_ev) if rot_ev else len(rot_ids),
                 role_changed_count=len(role_ev) if role_ev else len(role_ids),

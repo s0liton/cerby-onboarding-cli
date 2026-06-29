@@ -5,16 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=cerby
 WorkingDirectory=/opt/cerby-onboarding-cli
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/cerby-onboarding-cli/.playwright
 ExecStart=/opt/cerby-onboarding-cli/.venv/bin/cerby-onboarding service --config /opt/cerby-onboarding-cli/config/config.yaml
 Restart=on-failure
 RestartSec=30
-
-# Provide a one-time access_token in config/config.yaml, or create assets/.cerby_session.json
-# via an interactive run. Logs go to log/; the live service report is running_report.json
-# in the project root. Session state lives under assets/.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

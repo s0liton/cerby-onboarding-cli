@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -60,8 +61,13 @@ class RunLogger:
         self._logger.addHandler(handler)
 
         if mirror_stderr:
-            stream = logging.StreamHandler()
-            stream.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+            stream = logging.StreamHandler(sys.stderr)
+            stream.setFormatter(
+                logging.Formatter(
+                    "%(asctime)sZ %(levelname)s %(message)s",
+                    datefmt="%Y-%m-%dT%H:%M:%S",
+                )
+            )
             self._logger.addHandler(stream)
 
     def _emit(self, level: int, message: str, **fields: Any) -> None:

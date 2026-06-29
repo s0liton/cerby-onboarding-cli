@@ -35,13 +35,14 @@ Starts a step-by-step wizard. Choose **manual** (pick accounts once) or **automa
 uv run cerby-onboarding          # same as `run`
 uv run cerby-onboarding run \
   --workspace mycompany \
-  --app-name slack \
-  --account-role COLLABORATOR
+  --app-name "slack,zoom" \
+  --account-role COLLABORATOR \
+  --session-name production-onboarding
 ```
 
 First run opens a browser to sign in. The token is saved to `assets/.cerby_session.json`.
 
-**Work sessions** (`assets/work_sessions/`) track which accounts were already acted on, so re-runs skip them. On resume, automated mode delta-syncs accounts missed while offline.
+**Work sessions** (`assets/work_sessions/`) are identified by a **unique session name** you choose at creation. They track which accounts were already acted on, so re-runs skip them. Names cannot be reused or overwritten.
 
 At the end of a run you can export a JSON report. Logs go to `log/cerby-onboarding.log`.
 
@@ -51,7 +52,7 @@ For long-running, unattended operation (e.g. systemd). Configuration lives in `c
 
 ```bash
 cp config/config.example.yaml config/config.yaml
-# Edit: workspace, app_name, session_id, actions, poll_interval, etc.
+# Edit: workspace, app_names, session_name, actions, poll_interval, etc.
 uv run cerby-onboarding service --config config/config.yaml
 ```
 
@@ -60,9 +61,11 @@ uv run cerby-onboarding service --config config/config.yaml
 - A one-time `access_token` in `config/config.yaml` (removed from the file on first start), or
 - An existing `assets/.cerby_session.json` from a prior interactive run
 
-**systemd:** adjust paths in `deploy/cerby-onboarding.service`, then enable the unit.
+**Work session** — service mode uses `session_name` from config (default: `production`) and creates `assets/work_sessions/<name>.json` automatically on first start. Interactive mode still prompts for session names as before.
 
-**Monitoring:** `log/cerby-onboarding.log` and `running_report.json` (updated while the service runs).
+**systemd:** set `WorkingDirectory` to the project root and adjust paths in `deploy/cerby-onboarding.service`, then enable the unit. Service logs are written to `log/cerby-onboarding.log` and mirrored to stderr (visible in `journalctl`).
+
+**Monitoring:** `log/cerby-onboarding.log`, `journalctl -u cerby-onboarding.service`, and `running_report.json` (updated while the service runs).
 
 ## Runtime files
 
