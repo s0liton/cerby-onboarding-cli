@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# WorkingDirectory is optional for service mode (paths are derived from the config file
+# location, e.g. <project>/config/config.yaml → <project>/assets/work_sessions/).
 WorkingDirectory=/opt/cerby-onboarding-cli
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/cerby-onboarding-cli/.playwright
 ExecStart=/opt/cerby-onboarding-cli/.venv/bin/cerby-onboarding service --config /opt/cerby-onboarding-cli/config/config.yaml

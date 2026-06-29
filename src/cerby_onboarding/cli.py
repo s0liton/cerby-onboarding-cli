@@ -38,6 +38,9 @@ from cerby_onboarding.paths import (
     data_dir,
     ensure_assets_dir,
     ensure_log_dir,
+    project_root_from_config,
+    set_project_root,
+    work_sessions_dir,
 )
 from cerby_onboarding.run_logging import DEFAULT_LOG_FILE, RunLogger, redact_sensitive
 from cerby_onboarding.running_report import RunningReportWriter
@@ -1457,12 +1460,18 @@ def _interactive_sync_impl(
 
 def _run_service_impl(config_path: Path) -> None:
     config_path = config_path.resolve()
+    project_root = set_project_root(project_root_from_config(config_path))
     ensure_assets_dir()
     ensure_log_dir()
 
     default_log = (data_dir() / DEFAULT_LOG_FILE).resolve()
     active = _build_active_run(default_log, interactive=False, mirror_stderr=True)
-    active.log_info("Cerby onboarding service starting", config=str(config_path))
+    active.log_info(
+        "Cerby onboarding service starting",
+        config=str(config_path),
+        project_root=str(project_root),
+        work_sessions_dir=str(work_sessions_dir()),
+    )
 
     try:
         svc = load_service_config(config_path)

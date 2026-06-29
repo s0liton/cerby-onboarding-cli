@@ -140,7 +140,7 @@ class WorkSessionTracker:
                 f"Work session name already exists: {name!r}. Choose a different name."
             )
         slug = session_name_slug(name)
-        path = work_sessions_dir() / f"{slug}.json"
+        path = (work_sessions_dir() / f"{slug}.json").resolve()
         if path.exists():
             raise ValueError(
                 f"Work session file already exists: {path}. Choose a different session name."
@@ -161,7 +161,7 @@ class WorkSessionTracker:
 
     @classmethod
     def load(cls, path: Path | str) -> WorkSessionTracker:
-        p = Path(path)
+        p = Path(path).resolve()
         raw = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("session file must be a JSON object")
@@ -264,7 +264,7 @@ def _verify_session_match(
 def load_session_by_name(session_name: str, workspace: str, app_name: str) -> WorkSessionTracker:
     """Load a work session by its unique ``session_name``."""
     name = normalize_session_name(session_name)
-    slug_path = work_sessions_dir() / f"{session_name_slug(name)}.json"
+    slug_path = (work_sessions_dir() / f"{session_name_slug(name)}.json").resolve()
     if slug_path.is_file():
         tracker = WorkSessionTracker.load(slug_path)
         _verify_session_match(tracker, name, workspace, app_name)
