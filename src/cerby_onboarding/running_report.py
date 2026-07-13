@@ -109,13 +109,23 @@ class RunningReportWriter:
             cutoff=cutoff,
         )
 
-    def record_poll(self, *, new_account_count: int) -> None:
+    def record_poll(
+        self,
+        *,
+        new_account_count: int,
+        retry_account_count: int = 0,
+    ) -> None:
         if not self._data:
             return
         summary = self._data.setdefault("summary", {})
         summary["last_poll_at"] = _iso_now()
-        if new_account_count:
-            self.record_event("Poll found new accounts", new_account_count=new_account_count)
+        total = new_account_count + retry_account_count
+        if total:
+            self.record_event(
+                "Poll found accounts to process",
+                new_account_count=new_account_count,
+                retry_account_count=retry_account_count,
+            )
 
     def append_action_results(
         self,

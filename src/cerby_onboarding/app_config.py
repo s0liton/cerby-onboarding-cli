@@ -142,7 +142,7 @@ def load_service_config(config_path: Path | str) -> ServiceConfig:
         DEFAULT_RUNNING_REPORT,
     )
 
-    keep_browser = bool(raw.get("experimental_keep_browser_for_token", True))
+    keep_browser = bool(raw.get("experimental_keep_browser_for_token", False))
     verbose_http = bool(raw.get("verbose_http", False))
 
     return ServiceConfig(

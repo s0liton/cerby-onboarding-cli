@@ -116,6 +116,56 @@ def _accounts_created_after(
     return out
 
 
+def _actions_required(choice: str) -> tuple[bool, bool]:
+    need_rotate = choice in ("rotate", "both")
+    need_role = choice in ("role", "both")
+    return need_rotate, need_role
+
+
+def _account_fully_processed(
+    account_id: str,
+    choice: str,
+    session_tracker: work_session.WorkSessionTracker,
+) -> bool:
+    """True when every configured action has succeeded for this account in the work session."""
+    aid = str(account_id)
+    need_rotate, need_role = _actions_required(choice)
+    if need_rotate and not session_tracker.has_rotated(aid):
+        return False
+    if need_role and not session_tracker.has_role_changed(aid):
+        return False
+    return True
+
+
+def _update_pending_retries(
+    pending_retries: set[str],
+    accounts: list[dict[str, Any]],
+    choice: str,
+    session_tracker: work_session.WorkSessionTracker,
+) -> None:
+    for acc in accounts:
+        aid = _account_row_id(acc)
+        if not aid:
+            continue
+        if _account_fully_processed(aid, choice, session_tracker):
+            pending_retries.discard(aid)
+        else:
+            pending_retries.add(aid)
+
+
+def _merge_accounts_by_id(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for acc in group:
+            aid = _account_row_id(acc)
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            out.append(acc)
+    return out
+
+
 def _format_utc_short(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -1146,6 +1196,7 @@ def _run_automated_watch(
     run_started_at = datetime.now(timezone.utc).isoformat()
     all_rotations: list[dict[str, Any]] = []
     all_role_changes: list[dict[str, Any]] = []
+    pending_retries: set[str] = set()
 
     delta_cutoff: Optional[datetime] = None
     if session_tracker.is_persisted():
@@ -1182,6 +1233,15 @@ def _run_automated_watch(
             )
             all_rotations.extend(rots)
             all_role_changes.extend(rcs)
+            _update_pending_retries(
+                pending_retries, catch_up, choice, session_tracker
+            )
+            if pending_retries:
+                _say(
+                    active,
+                    f"Delta sync: {len(pending_retries)} account(s) still pending (will retry on poll)",
+                    style="yellow",
+                )
         else:
             _say(active, "Delta sync: nothing to catch up")
     else:
@@ -1242,27 +1302,49 @@ def _run_automated_watch(
             current = _fetch_accounts_merged_once_with_403_retry(
                 cfg, token, announce_sync=False, verbose_log=verbose_log, active=active
             )
-            new_accounts = [
+            known_before = set(watched_ids)
+            for acc in current:
+                if aid := _account_row_id(acc):
+                    watched_ids.add(aid)
+            newly_seen = [
                 a
                 for a in current
-                if (i := _account_row_id(a)) and i not in watched_ids
+                if (i := _account_row_id(a)) and i not in known_before
             ]
+            retry_accounts = [
+                a
+                for a in current
+                if (i := _account_row_id(a)) and i in pending_retries
+            ]
+            to_process = _merge_accounts_by_id(newly_seen, retry_accounts)
             if active is not None and active.running_report is not None:
-                active.running_report.record_poll(new_account_count=len(new_accounts))
-            if not new_accounts:
+                active.running_report.record_poll(
+                    new_account_count=len(newly_seen),
+                    retry_account_count=len(retry_accounts),
+                )
+            if not to_process:
                 if active is None or active.interactive:
                     console.print(
                         f"[dim]{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z — no new accounts[/dim]"
                     )
                 else:
-                    active.log_debug("Poll: no new accounts")
+                    active.log_debug("Poll: no accounts to process")
                 continue
-            _say(active, f"New accounts: {len(new_accounts)} — running actions")
+            if newly_seen and retry_accounts:
+                _say(
+                    active,
+                    f"Processing {len(to_process)} account(s): "
+                    f"{len(newly_seen)} new, {len(retry_accounts)} retry",
+                )
+            elif retry_accounts:
+                _say(active, f"Retrying {len(retry_accounts)} pending account(s)")
+            else:
+                _say(active, f"New accounts: {len(newly_seen)} — running actions")
             rots, rcs = _execute_bulk_account_actions(
                 cfg,
                 client,
                 session_tracker,
-                new_accounts,
+                to_process,
                 choice,
                 run_started_at=run_started_at,
                 table_title="Automated actions",
@@ -1274,9 +1356,9 @@ def _run_automated_watch(
             )
             all_rotations.extend(rots)
             all_role_changes.extend(rcs)
-            for a in new_accounts:
-                if i := _account_row_id(a):
-                    watched_ids.add(i)
+            _update_pending_retries(
+                pending_retries, to_process, choice, session_tracker
+            )
     except KeyboardInterrupt:
         _say(active, "Automated watch stopped (Ctrl+C)", style="yellow")
 

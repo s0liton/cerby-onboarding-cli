@@ -1,10 +1,24 @@
-# Cerby Onboarding CLI
+## Introduction
 
-Bulk rotate passwords and change user roles on Cerby accounts after self-onboarding. The tool fetches accounts that match your filters, then rotates passwords and/or downgrades owners to collaborators.
+A tool that helps you onboard accounts into Cerby and get them into a proper security posture immediatley. When a user onboards their own credentials into Cerby, they gain "owner" access to those credentials, and STILL know their current password. You typically want to make sure the user does not have that level of permission to the account, and you want to change the password to something secure as soon as possible. This tool does both for you.
 
-**Requires:** Python 3.12+, and a Cerby user who is a **super administrator with all access mode**.
+### Two modes of operation:
+
+##### Manual mode
+
+- You provide the accounts to act on via a CSV file.
+
+##### Automated mode
+
+- The tool acts like a listener on the Cerby API and processes accounts as they are added.
+
+##### Service mode
+
+- Same as Automated mode, but built to run as a liux service for long term automated actions.
 
 ## Install
+
+**Requires:** Python 3.12+, and a Cerby API token with: Read Accounts, Write Accounts, Write Automation Jobs scopes.
 
 ```bash
 git clone <repository-url>
@@ -13,8 +27,7 @@ uv sync
 uv run playwright install chromium
 ```
 
-<details>
-<summary>Install with pip instead of uv</summary>
+Install with pip instead of uv
 
 ```bash
 python3.12 -m venv .venv
@@ -23,11 +36,7 @@ pip install -e .
 playwright install chromium
 ```
 
-</details>
-
-Run all commands below from the **repo root**.
-
-## Interactive mode
+## Manual and Automated Interactive mode
 
 Starts a step-by-step wizard. Choose **manual** (pick accounts once) or **automated** (poll for new accounts — good for short onboarding windows).
 
@@ -69,15 +78,17 @@ uv run cerby-onboarding service --config config/config.yaml
 
 ## Runtime files
 
-| Path | Purpose |
-|------|---------|
-| `assets/.cerby_session.json` | API access token |
-| `assets/work_sessions/` | Per-run progress (rotations, role changes) |
-| `log/` | Application logs |
-| `running_report.json` | Live service summary |
-| `cerby_run_report_*.json` | Optional exports from interactive runs |
+| Path                         | Purpose                                    |
+| ---------------------------- | ------------------------------------------ |
+| `assets/.cerby_session.json` | API access token                           |
+| `assets/work_sessions/`      | Per-run progress (rotations, role changes) |
+| `log/`                       | Application logs                           |
+| `running_report.json`        | Live service summary                       |
+| `cerby_run_report_*.json`    | Optional exports from interactive runs     |
 
-Set `CERBY_DATA_DIR` to change the project root for logs/reports. Set `CERBY_ASSETS_DIR` to relocate `assets/`.
+Set `CERBY_DATA_DIR` to change the project root for logs/reports. Set `CERBY_ASSETS_DIR` to relocate `assets/` (must be the `assets` directory itself, not `assets/work_sessions`).
+
+Service mode pins the project root from the config file path (`config/config.yaml` → parent of `config/`), so asset paths do not depend on the process working directory.
 
 ## Help
 
