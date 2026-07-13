@@ -31,5 +31,7 @@ role_exclude_user_ids: []
 log_file: log/cerby-onboarding.log
 running_report: running_report.json
 
-experimental_keep_browser_for_token: true
+# false (default): refresh via GET /v1/auth/refresh on each poll when the JWT is near expiry.
+# true: experimental — keep Chromium open and scrape localStorage (~every 60s).
+experimental_keep_browser_for_token: false
 verbose_http: false
